@@ -262,6 +262,31 @@ class S3BackupStructureDto(yaml.YAMLObject):
 
     backups: list[S3BackupDto]
 
+    def reachable(self, snapshot: ZFSSnapshot) -> bool:
+        return any(backup.snapshot.guid == snapshot.guid for backup in self.backups)
+
+    def add(self, added: S3BackupDto) -> S3BackupStructureDto:
+        if any(a == added for a in self.backups):
+            raise AssertionError("Tried to add already-known backup")
+        return S3BackupStructureDto(self.backups + [added])
+
+    def remove(self, removed: S3BackupDto) -> S3BackupStructureDto:
+        if not any(a == removed for a in self.backups):
+            raise AssertionError("Tried to remove unknown backup")
+        backups = [backup for backup in self.backups if backup != removed]
+        return S3BackupStructureDto(backups)
+
+    def validate(self) -> None:
+        """
+        A backup structure is valid if for all backups that have a base,
+        the base is also stored.
+        Thus, we will be able to restore any backup.
+        """
+        known_guids = {backup.snapshot.guid: True for backup in self.backups}
+        for backup in self.backups:
+            if backup.base and backup.base.guid not in known_guids:
+                raise AssertionError(f"Backup base is not reachable: {backup}")
+
     @classmethod
     def load(cls) -> S3BackupStructureDto:
         file_ = os.path.join(data_dir(), cls.filename)
@@ -274,6 +299,7 @@ class S3BackupStructureDto(yaml.YAMLObject):
             return result
 
     def save(self) -> None:
+        self.validate()
         file_tmp = os.path.join(data_dir(), f".{self.filename}")
         file_ = os.path.join(data_dir(), self.filename)
         with open(file_tmp, "w", encoding="utf-8") as fd:
@@ -408,11 +434,16 @@ def main() -> None:
         prev_snapshot = (
             ZFSSnapshot(args.prev_snapshot_name) if args.prev_snapshot_name else None
         )
-        config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
         backup = S3BackupDto(
             snapshot=SnapshotDto.create(snapshot),
             base=SnapshotDto.create(prev_snapshot) if prev_snapshot else None,
         )
+
+        structure = S3BackupStructureDto.load()
+        structure = structure.add(backup)
+        structure.validate()
+
+        config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
         stream = ZFSSendStream.create(config)
         layout = s3_multipart_schedule_layout(stream.measure_size())
         schedule = S3UploadScheduleDto(backup=backup, layout=layout)
@@ -424,6 +455,11 @@ def main() -> None:
         base = (
             ZFSSnapshot.create(schedule.backup.base) if schedule.backup.base else None
         )
+
+        structure = S3BackupStructureDto.load()
+        structure = structure.add(schedule.backup)
+        structure.validate()
+
         config = ZFSSendStreamConfig(snapshot, base=base)
         s3 = boto3.client("s3")
         progress = S3UploadProgressDto.load()
@@ -468,6 +504,7 @@ def main() -> None:
             MultipartUpload={"Parts": progress.s3_parts()},
         )
         print("Upload complete!")
+        structure.save()
         S3UploadScheduleDto.delete()
         S3UploadProgressDto.delete()
     elif args.command == "abort_upload":
