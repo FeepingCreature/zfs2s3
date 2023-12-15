@@ -369,13 +369,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ZFS snapshot tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Subparser for the 'guid' command
     parser_guid = subparsers.add_parser("guid", help="Get the GUID of a ZFS snapshot")
     parser_guid.add_argument(
         "snapshot_name", help='Name of the ZFS snapshot (e.g., "tank@snapshot")'
     )
 
-    # Subparser for the 'stream_size' command
     parser_stream_size = subparsers.add_parser(
         "stream_size", help="Get the size of a ZFS send stream"
     )
@@ -409,6 +407,22 @@ def main() -> None:
     )
 
     subparsers.add_parser("abort_upload", help="Abort a running multi-part upload")
+
+    parser_remove = subparsers.add_parser(
+        "remove",
+        help="Remove the S3 backup for a checkpoint",
+    )
+    parser_remove.add_argument(
+        "-i",
+        "--increment",
+        dest="prev_snapshot_name",
+        help="Previous snapshot name for incremental backup (optional)."
+        " When the same checkpoint is backed up via multiple incremental paths,"
+        " this selects the backup to remove.",
+    )
+    parser_remove.add_argument(
+        "snapshot_name", help="Name of the ZFS snapshot to remove a backup for"
+    )
 
     args = parser.parse_args()
 
@@ -524,6 +538,28 @@ def main() -> None:
         S3UploadScheduleDto.delete()
         S3UploadProgressDto.delete()
         print("Upload aborted.")
+    elif args.command == "remove":
+        snapshot = ZFSSnapshot(args.snapshot_name)
+        prev_snapshot = (
+            ZFSSnapshot(args.prev_snapshot_name) if args.prev_snapshot_name else None
+        )
+        backup = S3BackupDto(
+            snapshot=SnapshotDto.create(snapshot),
+            base=SnapshotDto.create(prev_snapshot) if prev_snapshot else None,
+        )
+        config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
+
+        structure = S3BackupStructureDto.load()
+        structure = structure.remove(backup)
+        structure.validate()
+
+        s3 = boto3.client("s3")
+        s3.delete_object(
+            Bucket=BUCKET,
+            Key=config.key,
+        )
+        structure.save()
+        print(f"S3 key '{config.key}' removed.")
 
 
 if __name__ == "__main__":
