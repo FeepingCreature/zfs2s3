@@ -365,6 +365,144 @@ def s3_multipart_schedule_layout(size: int) -> S3UploadScheduleLayoutDto:
     )
 
 
+def cmd_guid(snapshot_name: str) -> None:
+    snapshot = ZFSSnapshot(snapshot_name)
+    print(f"GUID for snapshot '{snapshot_name}': {snapshot.guid}")
+
+
+def cmd_stream_size(snapshot_name: str, prev_snapshot_name: Optional[str]) -> None:
+    snapshot = ZFSSnapshot(snapshot_name)
+    prev_snapshot = ZFSSnapshot(prev_snapshot_name) if prev_snapshot_name else None
+    config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
+    stream = ZFSSendStream.create(config)
+    stream_size = stream.measure_size()
+    print(f"Stream size for snapshot '{snapshot_name}': {stream_size}")
+
+
+def cmd_prepare_upload_schedule(
+    snapshot_name: str, prev_snapshot_name: Optional[str]
+) -> None:
+    snapshot = ZFSSnapshot(snapshot_name)
+    prev_snapshot = ZFSSnapshot(prev_snapshot_name) if prev_snapshot_name else None
+    backup = S3BackupDto(
+        snapshot=SnapshotDto.create(snapshot),
+        base=SnapshotDto.create(prev_snapshot) if prev_snapshot else None,
+    )
+
+    structure = S3BackupStructureDto.load()
+    structure = structure.add(backup)
+    structure.validate()
+
+    config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
+    stream = ZFSSendStream.create(config)
+    layout = s3_multipart_schedule_layout(stream.measure_size())
+    schedule = S3UploadScheduleDto(backup=backup, layout=layout)
+    schedule.save()
+    print("Upload schedule saved!")
+
+
+def cmd_execute_upload() -> None:
+    schedule = S3UploadScheduleDto.load()
+    snapshot = ZFSSnapshot.create(schedule.backup.snapshot)
+    base = ZFSSnapshot.create(schedule.backup.base) if schedule.backup.base else None
+
+    structure = S3BackupStructureDto.load()
+    structure = structure.add(schedule.backup)
+    structure.validate()
+
+    config = ZFSSendStreamConfig(snapshot, base=base)
+    s3 = boto3.client("s3")
+    progress = S3UploadProgressDto.load()
+    if progress:
+        print("Resuming multi-part upload...")
+    else:
+        print("Initiating multi-part upload...")
+        result = s3.create_multipart_upload(
+            Bucket=BUCKET,
+            StorageClass=STORAGE_CLASS,
+            Key=config.key,
+        )
+        progress = S3UploadProgressDto(chunks_done=0, upload_id=result["UploadId"])
+        progress.save()
+    stream = ZFSSendStream.create(config)
+    layout = schedule.layout
+    stream.seek(min(layout.size, layout.chunksize * progress.chunks_done))
+    for chunk_idx in range(progress.chunks_done, layout.chunkcount):
+        # last chunk may be smaller
+        length = min(layout.chunksize, layout.size - layout.chunksize * chunk_idx)
+        data = stream.read(length)
+        print(f"Uploading chunk {chunk_idx + 1} / {layout.chunkcount}...")
+        global PROGRESS_BAR
+        PROGRESS_BAR = tqdm.tqdm(total=length, unit="B", unit_scale=True, leave=False)
+        result = s3.upload_part(
+            Bucket=BUCKET,
+            Key=config.key,
+            PartNumber=chunk_idx + 1,
+            UploadId=progress.upload_id,
+            Body=data,
+        )
+        PROGRESS_BAR = None
+        progress.finish_chunk(result["ETag"])
+    stream.expect_end()
+    print("Finalizing...")
+    s3.complete_multipart_upload(
+        Bucket=BUCKET,
+        Key=config.key,
+        UploadId=progress.upload_id,
+        MultipartUpload={"Parts": progress.s3_parts()},
+    )
+    print("Upload complete!")
+    structure.save()
+    S3UploadScheduleDto.delete()
+    S3UploadProgressDto.delete()
+
+
+def cmd_abort_upload() -> None:
+    progress = S3UploadProgressDto.load()
+    if not progress:
+        # If there is an upload, we haven't started it yet.
+        # Let's at least delete the schedule to be safe.
+        S3UploadScheduleDto.delete()
+        print("No upload was started.")
+        return
+
+    schedule = S3UploadScheduleDto.load()
+    snapshot = ZFSSnapshot.create(schedule.backup.snapshot)
+    base = ZFSSnapshot.create(schedule.backup.base) if schedule.backup.base else None
+    config = ZFSSendStreamConfig(snapshot=snapshot, base=base)
+
+    s3 = boto3.client("s3")
+    s3.abort_multipart_upload(
+        Bucket=BUCKET, Key=config.key, UploadId=progress.upload_id
+    )
+
+    S3UploadScheduleDto.delete()
+    S3UploadProgressDto.delete()
+    print("Upload aborted.")
+
+
+def cmd_remove(snapshot_name: str, prev_snapshot_name: Optional[str]) -> None:
+    snapshot = ZFSSnapshot(snapshot_name)
+    prev_snapshot = ZFSSnapshot(prev_snapshot_name) if prev_snapshot_name else None
+    backup = S3BackupDto(
+        snapshot=SnapshotDto.create(snapshot),
+        base=SnapshotDto.create(prev_snapshot) if prev_snapshot else None,
+    )
+    config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
+
+    structure = S3BackupStructureDto.load()
+    structure = structure.remove(backup)
+    structure.validate()
+
+    s3 = boto3.client("s3")
+    s3.delete_object(
+        Bucket=BUCKET,
+        Key=config.key,
+    )
+    structure.save()
+    print(f"S3 key '{config.key}' removed.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ZFS snapshot tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -425,141 +563,22 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    command = args.command
+    argdict = vars(args)
+    del argdict["command"]
 
-    if args.command == "guid":
-        snapshot = ZFSSnapshot(args.snapshot_name)
-        print(f"GUID for snapshot '{args.snapshot_name}': {snapshot.guid}")
-    elif args.command == "stream_size":
-        snapshot = ZFSSnapshot(args.snapshot_name)
-        prev_snapshot = (
-            ZFSSnapshot(args.prev_snapshot_name) if args.prev_snapshot_name else None
-        )
-        config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
-        stream = ZFSSendStream.create(config)
-        stream_size = stream.measure_size()
-        print(f"Stream size for snapshot '{args.snapshot_name}': {stream_size}")
-    elif args.command == "prepare_upload_schedule":
-        snapshot = ZFSSnapshot(args.snapshot_name)
-        prev_snapshot = (
-            ZFSSnapshot(args.prev_snapshot_name) if args.prev_snapshot_name else None
-        )
-        backup = S3BackupDto(
-            snapshot=SnapshotDto.create(snapshot),
-            base=SnapshotDto.create(prev_snapshot) if prev_snapshot else None,
-        )
-
-        structure = S3BackupStructureDto.load()
-        structure = structure.add(backup)
-        structure.validate()
-
-        config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
-        stream = ZFSSendStream.create(config)
-        layout = s3_multipart_schedule_layout(stream.measure_size())
-        schedule = S3UploadScheduleDto(backup=backup, layout=layout)
-        schedule.save()
-        print("Upload schedule saved!")
-    elif args.command == "execute_upload":
-        schedule = S3UploadScheduleDto.load()
-        snapshot = ZFSSnapshot.create(schedule.backup.snapshot)
-        base = (
-            ZFSSnapshot.create(schedule.backup.base) if schedule.backup.base else None
-        )
-
-        structure = S3BackupStructureDto.load()
-        structure = structure.add(schedule.backup)
-        structure.validate()
-
-        config = ZFSSendStreamConfig(snapshot, base=base)
-        s3 = boto3.client("s3")
-        progress = S3UploadProgressDto.load()
-        if progress:
-            print("Resuming multi-part upload...")
-        else:
-            print("Initiating multi-part upload...")
-            result = s3.create_multipart_upload(
-                Bucket=BUCKET,
-                StorageClass=STORAGE_CLASS,
-                Key=config.key,
-            )
-            progress = S3UploadProgressDto(chunks_done=0, upload_id=result["UploadId"])
-            progress.save()
-        stream = ZFSSendStream.create(config)
-        layout = schedule.layout
-        stream.seek(min(layout.size, layout.chunksize * progress.chunks_done))
-        for chunk_idx in range(progress.chunks_done, layout.chunkcount):
-            # last chunk may be smaller
-            length = min(layout.chunksize, layout.size - layout.chunksize * chunk_idx)
-            data = stream.read(length)
-            print(f"Uploading chunk {chunk_idx + 1} / {layout.chunkcount}...")
-            global PROGRESS_BAR
-            PROGRESS_BAR = tqdm.tqdm(
-                total=length, unit="B", unit_scale=True, leave=False
-            )
-            result = s3.upload_part(
-                Bucket=BUCKET,
-                Key=config.key,
-                PartNumber=chunk_idx + 1,
-                UploadId=progress.upload_id,
-                Body=data,
-            )
-            PROGRESS_BAR = None
-            progress.finish_chunk(result["ETag"])
-        stream.expect_end()
-        print("Finalizing...")
-        s3.complete_multipart_upload(
-            Bucket=BUCKET,
-            Key=config.key,
-            UploadId=progress.upload_id,
-            MultipartUpload={"Parts": progress.s3_parts()},
-        )
-        print("Upload complete!")
-        structure.save()
-        S3UploadScheduleDto.delete()
-        S3UploadProgressDto.delete()
-    elif args.command == "abort_upload":
-        progress = S3UploadProgressDto.load()
-        if not progress:
-            print("No upload in progress.")
-            # This is *like* success. There is no upload.
-            return
-
-        schedule = S3UploadScheduleDto.load()
-        snapshot = ZFSSnapshot.create(schedule.backup.snapshot)
-        base = (
-            ZFSSnapshot.create(schedule.backup.base) if schedule.backup.base else None
-        )
-        config = ZFSSendStreamConfig(snapshot=snapshot, base=base)
-
-        s3 = boto3.client("s3")
-        s3.abort_multipart_upload(
-            Bucket=BUCKET, Key=config.key, UploadId=progress.upload_id
-        )
-
-        S3UploadScheduleDto.delete()
-        S3UploadProgressDto.delete()
-        print("Upload aborted.")
-    elif args.command == "remove":
-        snapshot = ZFSSnapshot(args.snapshot_name)
-        prev_snapshot = (
-            ZFSSnapshot(args.prev_snapshot_name) if args.prev_snapshot_name else None
-        )
-        backup = S3BackupDto(
-            snapshot=SnapshotDto.create(snapshot),
-            base=SnapshotDto.create(prev_snapshot) if prev_snapshot else None,
-        )
-        config = ZFSSendStreamConfig(snapshot=snapshot, base=prev_snapshot)
-
-        structure = S3BackupStructureDto.load()
-        structure = structure.remove(backup)
-        structure.validate()
-
-        s3 = boto3.client("s3")
-        s3.delete_object(
-            Bucket=BUCKET,
-            Key=config.key,
-        )
-        structure.save()
-        print(f"S3 key '{config.key}' removed.")
+    if command == "guid":
+        cmd_guid(**argdict)
+    elif command == "stream_size":
+        cmd_stream_size(**argdict)
+    elif command == "prepare_upload_schedule":
+        cmd_prepare_upload_schedule(**argdict)
+    elif command == "execute_upload":
+        cmd_execute_upload()
+    elif command == "abort_upload":
+        cmd_abort_upload()
+    elif command == "remove":
+        cmd_remove(**argdict)
 
 
 if __name__ == "__main__":
