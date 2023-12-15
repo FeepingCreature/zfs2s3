@@ -207,27 +207,27 @@ class S3UploadScheduleDto(yaml.YAMLObject):
     layout: S3UploadScheduleLayoutDto
 
     def save(self) -> None:
-        file_ = os.path.join(data_dir(), S3UploadScheduleDto.filename)
+        file_ = os.path.join(data_dir(), self.filename)
         if os.path.exists(file_):
             raise AssertionError("There is already a pending upload schedule.")
-        progress_file = os.path.join(data_dir(), S3UploadProgressDto.filename)
+        progress_file = os.path.join(data_dir(), self.filename)
         if os.path.exists(progress_file):
             raise AssertionError("There is an abandoned progress file!")
         with open(file_, "w", encoding="utf-8") as fd:
             yaml.dump(self, fd)
 
-    @staticmethod
-    def load() -> S3UploadScheduleDto:
-        file_ = os.path.join(data_dir(), S3UploadScheduleDto.filename)
+    @classmethod
+    def load(cls) -> S3UploadScheduleDto:
+        file_ = os.path.join(data_dir(), cls.filename)
         with open(file_, "r", encoding="utf-8") as fd:
             result = yaml.safe_load(fd)
-            if not isinstance(result, S3UploadScheduleDto):
+            if not isinstance(result, cls):
                 raise AssertionError(f"safe_load() failed: got instead {result}")
             return result
 
-    @staticmethod
-    def delete() -> None:
-        file_ = os.path.join(data_dir(), S3UploadScheduleDto.filename)
+    @classmethod
+    def delete(cls) -> None:
+        file_ = os.path.join(data_dir(), cls.filename)
         os.remove(file_)
 
 
@@ -243,6 +243,8 @@ class S3UploadScheduleLayoutDto(yaml.YAMLObject):
 
 @dataclass
 class S3BackupDto(yaml.YAMLObject):
+    """A ZFS stream describing a snapshot that is stored on S3."""
+
     yaml_loader = yaml.SafeLoader
     yaml_tag = "!S3BackupDto"
 
@@ -252,11 +254,31 @@ class S3BackupDto(yaml.YAMLObject):
 
 @dataclass
 class S3BackupStructureDto(yaml.YAMLObject):
+    """All ZFS streams that have been stored on S3."""
+
     yaml_loader = yaml.SafeLoader
     yaml_tag = "!S3BackupStructureDto"
     filename = "stored_snapshots.yml"
 
     backups: list[S3BackupDto]
+
+    @classmethod
+    def load(cls) -> S3BackupStructureDto:
+        file_ = os.path.join(data_dir(), cls.filename)
+        if not os.path.exists(file_):
+            return cls(backups=[])
+        with open(file_, "r", encoding="utf-8") as fd:
+            result = yaml.safe_load(fd)
+            if not isinstance(result, cls):
+                raise AssertionError(f"safe_load() failed: got instead {result}")
+            return result
+
+    def save(self) -> None:
+        file_tmp = os.path.join(data_dir(), f".{self.filename}")
+        file_ = os.path.join(data_dir(), self.filename)
+        with open(file_tmp, "w", encoding="utf-8") as fd:
+            yaml.dump(self, fd)
+        os.rename(file_tmp, file_)
 
 
 @dataclass
@@ -275,8 +297,8 @@ class S3UploadProgressDto(yaml.YAMLObject):
         self.save()
 
     def save(self) -> None:
-        file_tmp = os.path.join(data_dir(), f".{S3UploadProgressDto.filename}")
-        file_ = os.path.join(data_dir(), S3UploadProgressDto.filename)
+        file_tmp = os.path.join(data_dir(), f".{self.filename}")
+        file_ = os.path.join(data_dir(), self.filename)
         with open(file_tmp, "w", encoding="utf-8") as fd:
             yaml.dump(self, fd)
         os.rename(file_tmp, file_)
@@ -286,20 +308,20 @@ class S3UploadProgressDto(yaml.YAMLObject):
             {"PartNumber": i + 1, "ETag": etag} for i, etag in enumerate(self.etags)
         ]
 
-    @staticmethod
-    def load() -> Optional[S3UploadProgressDto]:
-        file_ = os.path.join(data_dir(), S3UploadProgressDto.filename)
+    @classmethod
+    def load(cls) -> Optional[S3UploadProgressDto]:
+        file_ = os.path.join(data_dir(), cls.filename)
         if not os.path.exists(file_):
             return None
         with open(file_, "r", encoding="utf-8") as fd:
             result = yaml.safe_load(fd)
-            if not isinstance(result, S3UploadProgressDto):
+            if not isinstance(result, cls):
                 raise AssertionError(f"safe_load() failed: got instead {result}")
             return result
 
-    @staticmethod
-    def delete() -> None:
-        file_ = os.path.join(data_dir(), S3UploadProgressDto.filename)
+    @classmethod
+    def delete(cls) -> None:
+        file_ = os.path.join(data_dir(), cls.filename)
         os.remove(file_)
 
 
