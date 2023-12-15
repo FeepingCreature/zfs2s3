@@ -401,7 +401,7 @@ def cmd_prepare_upload_schedule(
     print("Upload schedule saved!")
 
 
-def cmd_execute_upload() -> None:
+def cmd_resume_upload() -> None:
     schedule = S3UploadScheduleDto.load()
     snapshot = ZFSSnapshot.create(schedule.backup.snapshot)
     base = ZFSSnapshot.create(schedule.backup.base) if schedule.backup.base else None
@@ -503,6 +503,12 @@ def cmd_remove(snapshot_name: str, prev_snapshot_name: Optional[str]) -> None:
     print(f"S3 key '{config.key}' removed.")
 
 
+def cmd_upload(snapshot_name: str, prev_snapshot_name: Optional[str]) -> None:
+    cmd_prepare_upload_schedule(
+        snapshot_name=snapshot_name,
+        prev_snapshot_name=prev_snapshot_name)
+    cmd_resume_upload()
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ZFS snapshot tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -525,6 +531,19 @@ def main() -> None:
         "snapshot_name", help="Name of the ZFS snapshot to send"
     )
 
+    parser_upload = subparsers.add_parser(
+        "upload", help="Upload a ZFS send stream to S3"
+    )
+    parser_upload.add_argument(
+        "-i",
+        "--increment",
+        dest="prev_snapshot_name",
+        help="Previous snapshot name for incremental send (optional)",
+    )
+    parser_upload.add_argument(
+        "snapshot_name", help="Name of the ZFS snapshot to send"
+    )
+
     parser_upload_schedule = subparsers.add_parser(
         "prepare_upload_schedule",
         help="Generate an upload schedule and save it as a YAML file",
@@ -540,7 +559,7 @@ def main() -> None:
     )
 
     subparsers.add_parser(
-        "execute_upload",
+        "resume_upload",
         help="Begin or resume a multipart upload according to the prepared schedule",
     )
 
@@ -571,10 +590,12 @@ def main() -> None:
         cmd_guid(**argdict)
     elif command == "stream_size":
         cmd_stream_size(**argdict)
+    elif command == "upload":
+        cmd_upload(**argdict)
     elif command == "prepare_upload_schedule":
         cmd_prepare_upload_schedule(**argdict)
-    elif command == "execute_upload":
-        cmd_execute_upload()
+    elif command == "resume_upload":
+        cmd_resume_upload()
     elif command == "abort_upload":
         cmd_abort_upload()
     elif command == "remove":
