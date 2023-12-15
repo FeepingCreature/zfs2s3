@@ -1,0 +1,8 @@
+# development requirements
+flake8
+pylint
+black
+isort
+bandit
+radon
+mypy

@@ -1,0 +1,6 @@
+[MESSAGES CONTROL]
+disable = missing-class-docstring, missing-function-docstring,
+    missing-module-docstring, protected-access,
+    too-few-public-methods, consider-using-with,
+    global-statement, too-many-locals, too-many-statements,
+    fixme
