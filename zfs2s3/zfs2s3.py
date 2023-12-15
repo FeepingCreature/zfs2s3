@@ -5,7 +5,6 @@ import argparse
 import math
 import os
 import subprocess  # nosec
-import sys
 from dataclasses import dataclass, field
 from io import BufferedIOBase
 from typing import Optional
@@ -40,18 +39,14 @@ AWSHTTPSConnection._send_message_body = hijack_send_message_body
 
 def get_snapshot_guid(snapshot_name: str) -> str:
     """Get the GUID for the ZFS snapshot."""
-    try:
-        cmd_args = ["zfs", "get", "-H", "-o", "value", "guid", snapshot_name]
-        result = subprocess.run(
-            cmd_args,
-            stdout=subprocess.PIPE,
-            text=True,
-            check=True,
-        )  # nosec
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Command '{' '.join(cmd_args)}' failed: {e.stderr}", file=sys.stderr)
-        sys.exit(1)
+    cmd_args = ["zfs", "get", "-H", "-o", "value", "guid", snapshot_name]
+    result = subprocess.run(
+        cmd_args,
+        stdout=subprocess.PIPE,
+        text=True,
+        check=True,
+    )  # nosec
+    return result.stdout.strip()
 
 
 class ZFSSnapshot:
