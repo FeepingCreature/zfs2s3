@@ -14,8 +14,8 @@ import tqdm  # type: ignore
 import yaml
 from botocore.awsrequest import AWSHTTPSConnection  # type: ignore
 
-BUCKET = "zfs2s3"
-STORAGE_CLASS = "STANDARD"
+BUCKET = os.environ.get("ZFS2S3_BUCKET", "zfs2s3")
+STORAGE_CLASS = os.environ.get("ZFS2S3_STORAGE_CLASS", "STANDARD")
 
 PROGRESS_BAR = None
 
@@ -505,9 +505,10 @@ def cmd_remove(snapshot_name: str, prev_snapshot_name: Optional[str]) -> None:
 
 def cmd_upload(snapshot_name: str, prev_snapshot_name: Optional[str]) -> None:
     cmd_prepare_upload_schedule(
-        snapshot_name=snapshot_name,
-        prev_snapshot_name=prev_snapshot_name)
+        snapshot_name=snapshot_name, prev_snapshot_name=prev_snapshot_name
+    )
     cmd_resume_upload()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ZFS snapshot tool")
@@ -540,9 +541,7 @@ def main() -> None:
         dest="prev_snapshot_name",
         help="Previous snapshot name for incremental send (optional)",
     )
-    parser_upload.add_argument(
-        "snapshot_name", help="Name of the ZFS snapshot to send"
-    )
+    parser_upload.add_argument("snapshot_name", help="Name of the ZFS snapshot to send")
 
     parser_upload_schedule = subparsers.add_parser(
         "prepare_upload_schedule",
